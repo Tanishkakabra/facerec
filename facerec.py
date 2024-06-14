@@ -3,39 +3,85 @@ import cv2
 import os
 import getpass
 import sys
+import pickle
+import dlib
+import numpy as np
 PWD = "Meow"
 
 
-def load_known_faces(known_faces_dir):
-    known_face_encodings = []
-    known_face_names = []
-    for filename in os.listdir(known_faces_dir):
-        if filename.endswith(('.jpg', '.png', 'jpeg')):
-            image_path = os.path.join(known_faces_dir, filename)
-            image = face_recognition.load_image_file(image_path)
-            encodings = face_recognition.face_encodings(image)
-            if encodings:  # Ensure that at least one face was found
-                known_face_encodings.append(encodings[0])
-                known_face_names.append(os.path.splitext(filename)[0])
+detector = dlib.get_frontal_face_detector()
+predictor = dlib.shape_predictor("/home/tanishka/facerec/shape_predictor_68_face_landmarks.dat")
+
+def shape_to_np(shape, dtype="int"):
+    # Initialize the list of (x, y)-coordinates
+    coords = np.zeros((68, 2), dtype=dtype)
+    
+    # Loop over the 68 facial landmarks and convert them to a 2-tuple of (x, y)-coordinates
+    for i in range(0, 68):
+        coords[i] = (shape.part(i).x, shape.part(i).y)
+    
+    return coords
+
+def eye_aspect_ratio(eye):
+    # Compute the euclidean distances between the two sets of vertical eye landmarks (x, y)-coordinates
+    A = np.linalg.norm(eye[1] - eye[5])
+    B = np.linalg.norm(eye[2] - eye[4])
+    
+    # Compute the euclidean distance between the horizontal eye landmark (x, y)-coordinates
+    C = np.linalg.norm(eye[0] - eye[3])
+    
+    # Compute the eye aspect ratio
+    ear = (A + B) / (2.0 * C)
+    return ear
+
+def detect_blink(frame):
+    # Convert the image to grayscale
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # Detect faces in the grayscale image
+    faces = detector(gray, 1)
+    
+    for face in faces:
+        # Get the landmarks for the face
+        shape = predictor(gray, face)
+        shape = shape_to_np(shape)
+        
+        # Extract the coordinates for the left and right eye
+        left_eye = shape[36:42]
+        right_eye = shape[42:48]
+        
+        # Compute the eye aspect ratio (EAR) for both eyes
+        left_ear = eye_aspect_ratio(left_eye)
+        right_ear = eye_aspect_ratio(right_eye)
+        
+        # Average the EAR for both eyes
+        ear = (left_ear + right_ear) / 2.0
+        
+        # Define a threshold to determine if the eyes are closed
+        EAR_THRESHOLD = 0.25
+        
+        return ear < EAR_THRESHOLD
+    
+    return False
+def load_known_faces(file_path):
+    with open(file_path, 'rb') as f:
+        known_face_encodings, known_face_names = pickle.load(f)
     return known_face_encodings, known_face_names
 
 
-
 def is_face_known(cap):
-    known_faces_dir = '/home/tanishka/facerec/green_flags'
-    known_face_encodings, known_face_names = load_known_faces(known_faces_dir)
+    known_faces_file = '/home/tanishka/facerec/known_faces.pkl'
+    known_face_encodings, known_face_names = load_known_faces(known_faces_file)
     count = 0
+    blink_seen = False
+    open_seen = False
     while count <= 10:
         count += 1
         ret, frame = cap.read()
-        if ret:
-            # Save the captured image to a file
-            cv2.imwrite('/home/tanishka/facerec/khich.jpg', frame)
-        # Load the test image
-        test_image_path = '/home/tanishka/facerec/khich.jpg'  # Change this to the path of your test image
-        test_image = face_recognition.load_image_file(test_image_path)
-        test_face_locations = face_recognition.face_locations(test_image)
-        test_face_encodings = face_recognition.face_encodings(test_image, test_face_locations)
+        if not ret:
+            continue
+        test_face_locations = face_recognition.face_locations(frame)
+        test_face_encodings = face_recognition.face_encodings(frame, test_face_locations)
 
         name = "Unknown"
         # Compare the test face with known faces
@@ -49,8 +95,13 @@ def is_face_known(cap):
 
             
             if (name != "Unknown"):
-                print("Test face matches:", name)
-                return True
+                if detect_blink(frame):
+                    blink_seen = True
+                else:
+                    open_seen = True
+                if (blink_seen and open_seen):
+                    print("Test face matches:", name)
+                    return True
             
     return False
 
